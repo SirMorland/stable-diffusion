@@ -470,7 +470,7 @@ class UNet(DDPM):
         self.register_buffer1('ddim_sigmas_for_original_num_steps', sigmas_for_original_sampling_steps)
 
     @torch.no_grad()
-    def sample(self,
+    async def sample(self,
                S,
                batch_size,
                shape,
@@ -512,7 +512,7 @@ class UNet(DDPM):
             self.model1.to(self.cdevice)
             self.model2.to(self.cdevice)
 
-        samples = self.plms_sampling(conditioning, size, seed,
+        samples = await self.plms_sampling(conditioning, size, seed,
                                                     callback=callback,
                                                     img_callback=img_callback,
                                                     quantize_denoised=quantize_x0,
@@ -535,7 +535,7 @@ class UNet(DDPM):
         return samples
 
     @torch.no_grad()
-    def plms_sampling(self, cond, shape, seed,
+    async def plms_sampling(self, cond, shape, seed,
                       x_T=None, ddim_use_original_steps=False,
                       callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, log_every_t=100,
@@ -591,7 +591,7 @@ class UNet(DDPM):
             old_eps.append(e_t)
             if len(old_eps) >= 4:
                 old_eps.pop(0)
-            if callback: callback(i)
+            if callback: await callback(i)
             if img_callback: img_callback(pred_x0, i)
 
         return img
