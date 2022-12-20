@@ -16,7 +16,7 @@ from contextlib import contextmanager, nullcontext
 from ldm.util import instantiate_from_config
 from optimizedSD.optimUtils import split_weighted_subprompts, logger
 from transformers import logging
-import pandas as pd
+# from samplers import CompVisDenoiser
 logging.set_verbosity_error()
 
 @dataclass
@@ -39,6 +39,8 @@ class Opt:
     unet_bs: int
     turbo: bool
     precision: str
+    sampler: str
+    ckpt: str
 
 def chunk(it, size):
     it = iter(it)
@@ -75,7 +77,9 @@ async def generateImages(data: dict, sio, sid):
         seed=data.get("seed", None),
         unet_bs=1,
         turbo=True,
-        precision="autocast"
+        precision="autocast",
+        sampler="plms",
+        ckpt=data.get("ckpt", ckpt),
     )
 
     if opt.seed == None:
@@ -83,7 +87,7 @@ async def generateImages(data: dict, sio, sid):
     seed_everything(opt.seed)
 
 
-    sd = load_model_from_config(f"{ckpt}")
+    sd = load_model_from_config(f"{opt.ckpt}")
     li, lo = [], []
     for key, value in sd.items():
         sp = key.split(".")
@@ -132,14 +136,17 @@ async def generateImages(data: dict, sio, sid):
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     if not opt.from_file:
+        assert opt.prompt is not None
         prompt = opt.prompt
-        assert prompt is not None
+        print(f"Using prompt: {prompt}")
         data = [batch_size * [prompt]]
 
     else:
         print(f"reading prompts from {opt.from_file}")
         with open(opt.from_file, "r") as f:
-            data = f.read().splitlines()
+            text = f.read()
+            print(f"Using prompt: {text.strip()}")
+            data = text.splitlines()
             data = batch_size * list(data)
             data = list(chunk(sorted(data), batch_size))
 
@@ -176,7 +183,7 @@ async def generateImages(data: dict, sio, sid):
                     else:
                         c = modelCS.get_learned_conditioning(prompts)
 
-                    shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+                    shape = [opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f]
 
                     if opt.device != "cpu":
                         mem = torch.cuda.memory_allocated() / 1e6
@@ -189,17 +196,19 @@ async def generateImages(data: dict, sio, sid):
                         await sio.sleep(0)
                         
 
-                    samples_ddim = await model.sample(S=opt.ddim_steps,
-                                    conditioning=c,
-                                    batch_size=opt.n_samples,
-                                    seed=opt.seed,
-                                    shape=shape,
-                                    verbose=False,
-                                    unconditional_guidance_scale=opt.scale,
-                                    unconditional_conditioning=uc,
-                                    eta=opt.ddim_eta,
-                                    x_T=start_code,
-                                    callback=callback)
+                    samples_ddim = await model.sample(
+                        S=opt.ddim_steps,
+                        conditioning=c,
+                        seed=opt.seed,
+                        shape=shape,
+                        verbose=False,
+                        unconditional_guidance_scale=opt.scale,
+                        unconditional_conditioning=uc,
+                        eta=opt.ddim_eta,
+                        x_T=start_code,
+                        sampler = opt.sampler,
+                        callback=callback
+                    )
 
                     modelFS.to(opt.device)
 

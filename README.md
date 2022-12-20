@@ -1,7 +1,3 @@
-# Update: v0.8
-
-[Added support for inpainting](#inpainting)
-
 <h1 align="center">Optimized Stable Diffusion</h1>
 <p align="center">
     <img src="https://img.shields.io/github/last-commit/basujindal/stable-diffusion?logo=Python&logoColor=green&style=for-the-badge"/>
@@ -11,35 +7,47 @@
 
 This repo is a modified version of the Stable Diffusion repo, optimized to use less VRAM than the original by sacrificing inference speed.
 
-To achieve this, the stable diffusion model is fragmented into four parts which are sent to the GPU only when needed. After the calculation is done, they are moved back to the CPU. This allows us to run a bigger model while requiring less VRAM.
+To reduce the VRAM usage, the following opimizations are used:
+
+- the stable diffusion model is fragmented into four parts which are sent to the GPU only when needed. After the calculation is done, they are moved back to the CPU.
+- The attention calculation is done in parts.
 
 <h1 align="center">Installation</h1>
 
 All the modified files are in the [optimizedSD](optimizedSD) folder, so if you have already cloned the original repository you can just download and copy this folder into the original instead of cloning the entire repo. You can also clone this repo and follow the same installation steps as the original (mainly creating the conda environment and placing the weights at the specified location).
 
+Alternatively, if you prefer to use Docker, you can do the following:
+
+1. Install [Docker](https://docs.docker.com/engine/install/), [Docker Compose plugin](https://docs.docker.com/compose/install/), and [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html#docker)
+2. Clone this repo to, e.g., `~/stable-diffusion`
+3. Put your downloaded `model.ckpt` file into `~/sd-data` (it's a relative path, you can change it in `docker-compose.yml`)
+4. `cd` into `~/stable-diffusion` and execute `docker compose up --build`
+
+This will launch gradio on port 7860 with txt2img. You can also use `docker compose run` to execute other Python scripts.
+
 <h1 align="center">Usage</h1>
 
 ## img2img
 
-- `img2img` can generate _512x512 images from a prior image and prompt on a 4GB VRAM GPU in under 20 seconds per image_ on an RTX 2060.
+- `img2img` can generate _512x512 images from a prior image and prompt using under 2.4GB VRAM in under 20 seconds per image_ on an RTX 2060.
 
-- The maximum size that can fit on 6GB GPU (RTX 2060) is around 576x768.
+- The maximum size that can fit on 6GB GPU (RTX 2060) is around 1152x1088.
 
-- For example, the following command will generate 20 512x512 images:
+- For example, the following command will generate 10 512x512 images:
 
-`python optimizedSD/optimized_img2img.py --prompt "Austrian alps" --init-img ~/sketch-mountains-input.jpg --strength 0.8 --n_iter 2 --n_samples 10 --H 512 --W 512`
+`python optimizedSD/optimized_img2img.py --prompt "Austrian alps" --init-img ~/sketch-mountains-input.jpg --strength 0.8 --n_iter 2 --n_samples 5 --H 512 --W 512`
 
 ## txt2img
 
-- `txt2img` can generate _512x512 images from a prompt on a 4GB VRAM GPU in under 25 seconds per image_ on an RTX 2060.
+- `txt2img` can generate _512x512 images from a prompt using under 2.4GB GPU VRAM in under 24 seconds per image_ on an RTX 2060.
 
-- For example, the following command will generate 20 512x512 images:
+- For example, the following command will generate 10 512x512 images:
 
-`python optimizedSD/optimized_txt2img.py --prompt "Cyberpunk style image of a Telsa car reflection in rain" --H 512 --W 512 --seed 27 --n_iter 2 --n_samples 10 --ddim_steps 50`
+`python optimizedSD/optimized_txt2img.py --prompt "Cyberpunk style image of a Tesla car reflection in rain" --H 512 --W 512 --seed 27 --n_iter 2 --n_samples 5 --ddim_steps 50`
 
 ## inpainting
 
-- `inpaint_gradio.py` can fill masked parts of an image based on a given prompt. It can inpaint 512x512 images while using under 4GB of VRAM.
+- `inpaint_gradio.py` can fill masked parts of an image based on a given prompt. It can inpaint 512x512 images while using under 2.5GB of VRAM.
 
 - To launch the gradio interface for inpainting, run `python optimizedSD/inpaint_gradio.py`. The mask for the image can be drawn on the selected image using the brush tool.
 
@@ -89,7 +97,7 @@ All the modified files are in the [optimizedSD](optimizedSD) folder, so if you h
 
 **Increases inference speed at the cost of extra VRAM usage.**
 
-- Using this argument increases the inference speed by using around 1GB of extra GPU VRAM. It is especially effective when generating a small batch of images (~ 1 to 4) images. It takes under 25 seconds for txt2img and 15 seconds for img2img (on an RTX 2060, excluding the time to load the model). Use it on larger batch sizes if GPU VRAM available.
+- Using this argument increases the inference speed by using around 700MB of extra GPU VRAM. It is especially effective when generating a small batch of images (~ 1 to 4) images. It takes under 20 seconds for txt2img and 15 seconds for img2img (on an RTX 2060, excluding the time to load the model). Use it on larger batch sizes if GPU VRAM available.
 
 ## `--precision autocast` or `--precision full`
 
@@ -118,8 +126,18 @@ All the modified files are in the [optimizedSD](optimizedSD) folder, so if you h
 
 - The number followed by the colon represents the weight given to the words before the colon. The weights can be both fractions or integers.
 
+## Troubleshooting
+
+### Green colored output images
+
+- If you have a Nvidia GTX series GPU, the output images maybe entirely green in color. This is because GTX series do not support half precision calculation, which is the default mode of calculation in this repository. To overcome the issue, use the `--precision full` argument. The downside is that it will lead to higher GPU VRAM usage.
+
+###
+
 ## Changelog
 
+- v1.0: Added support for multiple samplers for txt2img. Based on [crowsonkb](https://github.com/crowsonkb/k-diffusion)
+- v0.9: Added support for calculating attention in parts. (Thanks to @neonsecret @Doggettx, @ryudrigo)
 - v0.8: Added gradio interface for inpainting.
 - v0.7: Added support for logging, jpg file format
 - v0.6: Added support for using weighted prompts. (based on @lstein's [repo](https://github.com/lstein/stable-diffusion))

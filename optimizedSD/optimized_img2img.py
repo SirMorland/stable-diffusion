@@ -167,6 +167,13 @@ parser.add_argument(
     choices=["jpg", "png"],
     default="png",
 )
+parser.add_argument(
+    "--sampler",
+    type=str,
+    help="sampler",
+    choices=["ddim"],
+    default="ddim",
+)
 opt = parser.parse_args()
 
 tic = time.time()
@@ -229,8 +236,8 @@ if opt.device != "cpu" and opt.precision == "autocast":
 batch_size = opt.n_samples
 n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
 if not opt.from_file:
+    assert opt.prompt is not None
     prompt = opt.prompt
-    assert prompt is not None
     data = [batch_size * [prompt]]
 
 else:
@@ -246,9 +253,9 @@ init_image = repeat(init_image, "1 ... -> b ...", b=batch_size)
 init_latent = modelFS.get_first_stage_encoding(modelFS.encode_first_stage(init_image))  # move to latent space
 
 if opt.device != "cpu":
-    mem = torch.cuda.memory_allocated() / 1e6
+    mem = torch.cuda.memory_allocated(device=opt.device) / 1e6
     modelFS.to("cpu")
-    while torch.cuda.memory_allocated() / 1e6 >= mem:
+    while torch.cuda.memory_allocated(device=opt.device) / 1e6 >= mem:
         time.sleep(1)
 
 
@@ -295,9 +302,9 @@ with torch.no_grad():
                     c = modelCS.get_learned_conditioning(prompts)
 
                 if opt.device != "cpu":
-                    mem = torch.cuda.memory_allocated() / 1e6
+                    mem = torch.cuda.memory_allocated(device=opt.device) / 1e6
                     modelCS.to("cpu")
-                    while torch.cuda.memory_allocated() / 1e6 >= mem:
+                    while torch.cuda.memory_allocated(device=opt.device) / 1e6 >= mem:
                         time.sleep(1)
 
                 # encode (scaled latent)
@@ -309,12 +316,13 @@ with torch.no_grad():
                     opt.ddim_steps,
                 )
                 # decode it
-                samples_ddim = model.decode(
-                    z_enc,
-                    c,
+                samples_ddim = model.sample(
                     t_enc,
+                    c,
+                    z_enc,
                     unconditional_guidance_scale=opt.scale,
                     unconditional_conditioning=uc,
+                    sampler = opt.sampler
                 )
 
                 modelFS.to(opt.device)
@@ -332,13 +340,13 @@ with torch.no_grad():
                     base_count += 1
 
                 if opt.device != "cpu":
-                    mem = torch.cuda.memory_allocated() / 1e6
+                    mem = torch.cuda.memory_allocated(device=opt.device) / 1e6
                     modelFS.to("cpu")
-                    while torch.cuda.memory_allocated() / 1e6 >= mem:
+                    while torch.cuda.memory_allocated(device=opt.device) / 1e6 >= mem:
                         time.sleep(1)
 
                 del samples_ddim
-                print("memory_final = ", torch.cuda.memory_allocated() / 1e6)
+                print("memory_final = ", torch.cuda.memory_allocated(device=opt.device) / 1e6)
 
 toc = time.time()
 
