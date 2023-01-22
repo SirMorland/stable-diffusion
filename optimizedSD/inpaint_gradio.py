@@ -2,11 +2,15 @@ import argparse
 import os
 import re
 import time
+import io
 from contextlib import nullcontext
 from itertools import islice
 from random import randint
 
-import gradio as gr
+from io import BytesIO
+import base64
+
+#import gradio as gr
 import numpy as np
 import torch
 from PIL import Image
@@ -19,7 +23,7 @@ from tqdm import tqdm, trange
 from transformers import logging
 
 from ldm.util import instantiate_from_config
-from optimUtils import split_weighted_subprompts, logger
+from optimizedSD.optimUtils import split_weighted_subprompts, logger
 
 logging.set_verbosity_error()
 import mimetypes
@@ -83,7 +87,11 @@ def load_mask(mask, h0, w0, newH, newW, invert=False):
     return image
 
 
-def generate(
+async def generate(
+        config,
+        ckpt,
+        sio,
+        sid,
         image,
         mask_image,
         prompt,
@@ -103,6 +111,39 @@ def generate(
         turbo,
         full_precision,
 ):
+    sd = load_model_from_config(f"{ckpt}")
+    li, lo = [], []
+    for key, v_ in sd.items():
+        sp = key.split(".")
+        if (sp[0]) == "model":
+            if "input_blocks" in sp:
+                li.append(key)
+            elif "middle_block" in sp:
+                li.append(key)
+            elif "time_embed" in sp:
+                li.append(key)
+            else:
+                lo.append(key)
+    for key in li:
+        sd["model1." + key[6:]] = sd.pop(key)
+    for key in lo:
+        sd["model2." + key[6:]] = sd.pop(key)
+
+    config = OmegaConf.load(f"{config}")
+
+    model = instantiate_from_config(config.modelUNet)
+    _, _ = model.load_state_dict(sd, strict=False)
+    model.eval()
+
+    modelCS = instantiate_from_config(config.modelCondStage)
+    _, _ = modelCS.load_state_dict(sd, strict=False)
+    modelCS.eval()
+
+    modelFS = instantiate_from_config(config.modelFirstStage)
+    _, _ = modelFS.load_state_dict(sd, strict=False)
+    modelFS.eval()
+    del sd
+
     if seed == "":
         seed = randint(0, 1000000)
     seed = int(seed)
@@ -110,7 +151,7 @@ def generate(
     sampler = "ddim"
 
     # Logging
-    logger(locals(), log_csv="logs/inpaint_gradio_logs.csv")
+    # logger(locals(), log_csv="logs/inpaint_gradio_logs.csv")
 
     init_image = load_img(image['image'], Height, Width).to(device)
 
@@ -125,13 +166,6 @@ def generate(
         modelFS.half()
         init_image = init_image.half()
         # mask.half()
-
-    tic = time.time()
-    os.makedirs(outdir, exist_ok=True)
-    outpath = outdir
-    sample_path = os.path.join(outpath, "_".join(re.split(":| ", prompt)))[:150]
-    os.makedirs(sample_path, exist_ok=True)
-    base_count = len(os.listdir(sample_path))
 
     # n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     assert prompt is not None
@@ -168,8 +202,8 @@ def generate(
     else:
         precision_scope = nullcontext
 
+    images = []
     all_samples = []
-    seeds = ""
     with torch.no_grad():
         all_samples = list()
         for _ in trange(n_iter, desc="Sampling"):
@@ -206,8 +240,12 @@ def generate(
                         init_latent, torch.tensor([t_enc] * batch_size).to(device),
                         seed, ddim_eta, ddim_steps)
 
+                    async def callback (i):
+                        await sio.emit("status", data={"step": i + 1, "total": ddim_steps}, room=sid)
+                        await sio.sleep(0)
+
                     # decode it
-                    samples_ddim = model.sample(
+                    samples_ddim = await model.sample(
                         t_enc,
                         c,
                         z_enc,
@@ -216,6 +254,7 @@ def generate(
                         mask=mask,
                         x_T=init_latent,
                         sampler=sampler,
+                        callback=callback,
                     )
 
                     modelFS.to(device)
@@ -225,12 +264,16 @@ def generate(
                         x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                         all_samples.append(x_sample.to("cpu"))
                         x_sample = 255.0 * rearrange(x_sample[0].cpu().numpy(), "c h w -> h w c")
-                        Image.fromarray(x_sample.astype(np.uint8)).save(
-                            os.path.join(sample_path, "seed_" + str(seed) + "_" + f"{base_count:05}.{img_format}")
-                        )
-                        seeds += str(seed) + ","
+                        tmpImg = Image.fromarray(x_sample.astype(np.uint8))
+                        img = tmpImg # Image.composite(tmpImg, image['image'], mask_image)
+                        image_bytes = io.BytesIO()
+                        img.save(image_bytes, format='PNG')
+                        images.append({
+                            "seed": seed,
+                            "steps": ddim_steps,
+                            "data": image_bytes.getvalue()
+                        })
                         seed += 1
-                        base_count += 1
 
                     if device != "cpu":
                         mem = torch.cuda.memory_allocated() / 1e6
@@ -243,24 +286,9 @@ def generate(
                     del x_samples_ddim
                     print("memory_final = ", torch.cuda.memory_allocated() / 1e6)
 
-    toc = time.time()
+    return images
 
-    time_taken = (toc - tic) / 60.0
-    grid = torch.cat(all_samples, 0)
-    grid = make_grid(grid, nrow=n_iter)
-    grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
-
-    txt = (
-            "Samples finished in "
-            + str(round(time_taken, 3))
-            + " minutes and exported to \n"
-            + sample_path
-            + "\nSeeds used = "
-            + seeds[:-1]
-    )
-    return Image.fromarray(grid.astype(np.uint8)), image['mask'], txt
-
-
+"""
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='txt2img using gradio')
     parser.add_argument('--config_path', default="optimizedSD/v1-inference.yaml", type=str, help='config path')
@@ -326,3 +354,40 @@ if __name__ == '__main__':
         outputs=["image", "image", "text"],
     )
     demo.launch()
+"""
+
+async def inpaintImages(data: dict, sio, sid):
+    config = "../stable-diffusion/optimizedSD/v1-inference.yaml"
+    ckpt = "../stable-diffusion/models/ldm/stable-diffusion-v1/sd-v1.4.ckpt"
+
+    encodedImage = data["image"].split(',')[1]
+    image = dict()
+    image['image'] = Image.open(BytesIO(base64.b64decode(encodedImage)))
+    image['image'].save("img.png")
+    encodedMask = data["mask"].split(',')[1]
+    mask = Image.open(BytesIO(base64.b64decode(encodedMask))).convert('L')
+
+    return await generate(
+        config,
+        data.get("ckpt", ckpt),
+        sio,
+        sid,
+        image,
+        mask,
+        data.get("prompt"),
+        data.get("strength", 0.99),
+        data.get("steps", 50),
+        data.get("iterations", 1),
+        data.get("samples", 1),
+        data.get("height", 512),
+        data.get("width", 512),
+        data.get("scale", 7.5),
+        0.0,
+        1,
+        "cuda",
+        data.get("seed", ""),
+        None,
+        None,
+        True,
+        False,
+    )
